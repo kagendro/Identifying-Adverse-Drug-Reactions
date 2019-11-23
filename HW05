@@ -1,0 +1,152 @@
+DROP PROCEDURE IF EXISTS prescribe;
+DELIMITER // 
+CREATE PROCEDURE prescribe(
+	patientName VARCHAR(50),
+    medication VARCHAR(50),
+    dailyDose INT
+)
+BEGIN
+    DECLARE is_pregnant_var TINYINT;
+    DECLARE has_interaction TINYINT;
+    DECLARE pcp VARCHAR(50);
+    DECLARE dob DATE;
+    DECLARE age DOUBLE;
+    DECLARE safe_for_pregnancy TINYINT;
+    DECLARE safe_for_children TINYINT;
+    DECLARE mg_per_pill DOUBLE;
+    DECLARE mg_max DOUBLE;
+    DECLARE mg_prescribed DOUBLE;
+    DECLARE medication_id_var INT;
+    DECLARE medication2_id_var INT;
+    
+    
+	SET medication_id_var = (SELECT medication_id
+							FROM medication
+                            WHERE medication_name = medication);
+    
+    SELECT pat.is_pregnant,
+		pat.dob
+	INTO is_pregnant_var, dob
+    FROM patient pat 
+    WHERE pat.patient_name = patientName;
+    
+	SELECT med.safe_under_12,
+		med.safe_if_pregnant,
+        med.mg_per_pill,
+        med.max_mg_per_pill
+	INTO safe_for_children, safe_for_pregnancy, mg_per_pill, mg_max
+    FROM medication med 
+    WHERE medication_name = medication;
+    
+    SET mg_prescribed = dailyDose * mg_per_pill;
+    SET age = DATEDIFF(CURRENT_DATE, dob) / 365;
+    SET pcp = (SELECT doctor_name
+				FROM patient
+				JOIN doctor ON (patient.pcp_id = doctor.doctor_id)
+                WHERE patient_name = patientName);
+                
+	-- Patient Name, Medication Id
+	SET has_interaction = has_interaction(patientName, medication_id_var);
+	
+    
+    IF mg_prescribed > mg_max THEN
+		SELECT CONCAT('ALERT! You have prescribed too much for the patient!') as Alert;
+	ELSEIF age < 12 AND safe_for_children = FALSE THEN
+		SELECT CONCAT('ALERT! This medication is not safe for children!') as Alert;
+	ELSEIF is_pregnant_var = TRUE AND safe_for_pregnancy = FALSE THEN
+		SELECT CONCAT('ALERT! This medication is not safe for your pregnant patient!') as Alert;
+	ELSEIF has_interaction = TRUE THEN
+		SELECT CONCAT('ALERT! Do not prescribe this medication to the patient! 
+						It has an interaction with one of their prescriptions') as Alert;
+	ELSE
+    	INSERT INTO prescription (
+			doctor_name,
+			patient_name,
+			medication_name,
+			daily_dose,
+			prescription_date,
+			medication_id
+		)
+		VALUES (
+			pcp,
+			patientName,
+			medication,
+			dailyDose,
+			current_date(),
+			medication_id_var
+		);
+	END IF;
+	
+END //
+DELIMITER ;
+
+CALL prescribe('Smith','Acetaminophen',1);
+
+select *
+from prescription;
+
+
+
+
+DROP TRIGGER IF EXISTS patient_is_pregnant;
+DELIMITER //
+CREATE TRIGGER patient_is_pregnant
+	BEFORE UPDATE ON patient
+    FOR EACH ROW
+BEGIN
+	IF(NEW.is_pregnant = TRUE) THEN
+		SET MESSAGE_TEXT = 'You should probably do somehting!';
+	END IF;
+END;//
+DELIMITER ;
+
+
+
+DROP FUNCTION IF EXISTS has_interaction;
+DELIMITER //
+CREATE FUNCTION has_interaction
+(
+	patientName VARCHAR(50),
+	input_medication1_id INT
+)
+RETURNS BOOL
+DETERMINISTIC
+BEGIN 
+	DECLARE reaction_exists TINYINT;
+	DECLARE input_medication2_id INT;
+	DECLARE row_not_found TINYINT DEFAULT FALSE;
+    DECLARE update_count INT DEFAULT 0;
+    DECLARE row_count INT DEFAULT 0;
+    
+    DECLARE prescription_cursor CURSOR FOR
+		SELECT medication_id
+        FROM prescription
+        WHERE patient_name = patientName;
+	
+    DECLARE CONTINUE HANDLER FOR NOT FOUND
+		SET row_not_found = TRUE;
+        
+	OPEN prescription_cursor;
+    
+    FETCH prescription_cursor INTO input_medication2_id;
+    WHILE row_not_found = FALSE DO
+    
+		SET reaction_exists = (SELECT IF(COUNT(*) > 0, TRUE, FALSE) Result
+									FROM interaction
+									WHERE medication1_id = input_medication1_id AND medication2_id = input_medication2_id 
+										OR medication1_id = input_medication2_id AND medication2_id = input_medication1_id); 
+                                
+		IF reaction_exists = TRUE THEN
+			RETURN TRUE;
+		END IF;
+        
+        SET row_count = row_count + 1;
+		FETCH prescription_cursor INTO input_medication2_id;
+	END WHILE;
+    
+    CLOSE prescription_cursor;
+    RETURN FALSE;
+
+END //
+DELIMITER ;
+    
